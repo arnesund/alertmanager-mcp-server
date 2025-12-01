@@ -33,6 +33,14 @@ config = AlertmanagerConfig(
     password=os.environ.get("ALERTMANAGER_PASSWORD", ""),
 )
 
+# Pagination defaults and limits (configurable via environment variables)
+DEFAULT_SILENCE_PAGE = int(os.environ.get("ALERTMANAGER_DEFAULT_SILENCE_PAGE", "10"))
+MAX_SILENCE_PAGE = int(os.environ.get("ALERTMANAGER_MAX_SILENCE_PAGE", "50"))
+DEFAULT_ALERT_PAGE = int(os.environ.get("ALERTMANAGER_DEFAULT_ALERT_PAGE", "10"))
+MAX_ALERT_PAGE = int(os.environ.get("ALERTMANAGER_MAX_ALERT_PAGE", "25"))
+DEFAULT_ALERT_GROUP_PAGE = int(os.environ.get("ALERTMANAGER_DEFAULT_ALERT_GROUP_PAGE", "3"))
+MAX_ALERT_GROUP_PAGE = int(os.environ.get("ALERTMANAGER_MAX_ALERT_GROUP_PAGE", "5"))
+
 
 def make_request(method="GET", route="/", **kwargs):
     """Make HTTP request and return a requests.Response object.
@@ -67,6 +75,79 @@ def make_request(method="GET", route="/", **kwargs):
     return response.json()
 
 
+def validate_pagination_params(count: int, offset: int, max_count: int) -> tuple[int, int, Optional[str]]:
+    """Validate and normalize pagination parameters.
+
+    Parameters
+    ----------
+    count : int
+        Requested number of items per page
+    offset : int
+        Requested offset for pagination
+    max_count : int
+        Maximum allowed count value
+
+    Returns
+    -------
+    tuple[int, int, Optional[str]]
+        A tuple of (normalized_count, normalized_offset, error_message).
+        If error_message is not None, the parameters are invalid and should
+        return an error to the caller.
+    """
+    error = None
+
+    # Validate count parameter
+    if count < 1:
+        error = f"Count parameter ({count}) must be at least 1."
+    elif count > max_count:
+        error = (
+            f"Count parameter ({count}) exceeds maximum allowed value ({max_count}). "
+            f"Please use count <= {max_count} and paginate through results using the offset parameter."
+        )
+
+    # Validate offset parameter
+    if offset < 0:
+        error = f"Offset parameter ({offset}) must be non-negative (>= 0)."
+
+    return count, offset, error
+
+
+def paginate_results(items: List[Any], count: int, offset: int) -> Dict[str, Any]:
+    """Apply pagination to a list of items and generate pagination metadata.
+
+    Parameters
+    ----------
+    items : List[Any]
+        The full list of items to paginate
+    count : int
+        Number of items to return per page (must be >= 1)
+    offset : int
+        Number of items to skip (must be >= 0)
+
+    Returns
+    -------
+    Dict[str, Any]
+        A dictionary containing:
+        - data: List of items for the current page
+        - pagination: Metadata including total, offset, count, requested_count, and has_more
+    """
+    total = len(items)
+    end_index = offset + count
+    paginated_items = items[offset:end_index]
+    has_more = end_index < total
+
+    return {
+        "data": paginated_items,
+        "pagination": {
+            "total": total,
+            "offset": offset,
+            "count": len(paginated_items),
+            "requested_count": count,
+            "has_more": has_more
+        }
+    }
+
+
 @mcp.tool(description="Get current status of an Alertmanager instance and its cluster")
 async def get_status():
     """Get current status of an Alertmanager instance and its cluster
@@ -94,7 +175,7 @@ async def get_receivers():
 
 @mcp.tool(description="Get list of all silences")
 async def get_silences(filter: Optional[str] = None,
-                       count: int = 10,
+                       count: int = DEFAULT_SILENCE_PAGE,
                        offset: int = 0):
     """Get list of all silences
 
@@ -117,14 +198,10 @@ async def get_silences(filter: Optional[str] = None,
         - pagination: Metadata about pagination (total, offset, count, has_more)
           Use the 'has_more' flag to determine if additional pages are available.
     """
-    # Validate count parameter
-    MAX_COUNT = 50
-    if count > MAX_COUNT:
-        return {
-            "error": f"Count parameter ({count}) exceeds maximum allowed value ({MAX_COUNT}). "
-                    f"Please use count <= {MAX_COUNT} and paginate through results using the offset parameter. "
-                    f"Example: Make multiple calls with offset=0, offset={MAX_COUNT}, offset={MAX_COUNT*2}, etc."
-        }
+    # Validate pagination parameters
+    count, offset, error = validate_pagination_params(count, offset, MAX_SILENCE_PAGE)
+    if error:
+        return {"error": error}
 
     params = None
     if filter:
@@ -133,22 +210,8 @@ async def get_silences(filter: Optional[str] = None,
     # Get all silences from the API
     all_silences = make_request(method="GET", route="/api/v2/silences", params=params)
 
-    # Apply pagination
-    total = len(all_silences)
-    end_index = offset + count
-    paginated_silences = all_silences[offset:end_index]
-    has_more = end_index < total
-
-    return {
-        "data": paginated_silences,
-        "pagination": {
-            "total": total,
-            "offset": offset,
-            "count": len(paginated_silences),
-            "requested_count": count,
-            "has_more": has_more
-        }
-    }
+    # Apply pagination and return results
+    return paginate_results(all_silences, count, offset)
 
 
 @mcp.tool(description="Post a new silence or update an existing one")
@@ -215,7 +278,7 @@ async def get_alerts(filter: Optional[str] = None,
                      silenced: Optional[bool] = None,
                      inhibited: Optional[bool] = None,
                      active: Optional[bool] = None,
-                     count: int = 10,
+                     count: int = DEFAULT_ALERT_PAGE,
                      offset: int = 0):
     """Get a list of alerts currently in Alertmanager.
 
@@ -244,14 +307,10 @@ async def get_alerts(filter: Optional[str] = None,
         - pagination: Metadata about pagination (total, offset, count, has_more)
           Use the 'has_more' flag to determine if additional pages are available.
     """
-    # Validate count parameter
-    MAX_COUNT = 25
-    if count > MAX_COUNT:
-        return {
-            "error": f"Count parameter ({count}) exceeds maximum allowed value ({MAX_COUNT}). "
-                    f"Please use count <= {MAX_COUNT} and paginate through results using the offset parameter. "
-                    f"Example: Make multiple calls with offset=0, offset={MAX_COUNT}, offset={MAX_COUNT*2}, etc."
-        }
+    # Validate pagination parameters
+    count, offset, error = validate_pagination_params(count, offset, MAX_ALERT_PAGE)
+    if error:
+        return {"error": error}
 
     params = {"active": True}
     if filter:
@@ -266,22 +325,8 @@ async def get_alerts(filter: Optional[str] = None,
     # Get all alerts from the API
     all_alerts = make_request(method="GET", route="/api/v2/alerts", params=params)
 
-    # Apply pagination
-    total = len(all_alerts)
-    end_index = offset + count
-    paginated_alerts = all_alerts[offset:end_index]
-    has_more = end_index < total
-
-    return {
-        "data": paginated_alerts,
-        "pagination": {
-            "total": total,
-            "offset": offset,
-            "count": len(paginated_alerts),
-            "requested_count": count,
-            "has_more": has_more
-        }
-    }
+    # Apply pagination and return results
+    return paginate_results(all_alerts, count, offset)
 
 
 @mcp.tool(description="Create new alerts")
@@ -312,7 +357,7 @@ async def post_alerts(alerts: List[Dict]):
 async def get_alert_groups(silenced: Optional[bool] = None,
                            inhibited: Optional[bool] = None,
                            active: Optional[bool] = None,
-                           count: int = 3,
+                           count: int = DEFAULT_ALERT_GROUP_PAGE,
                            offset: int = 0):
     """Get a list of alert groups
 
@@ -340,15 +385,10 @@ async def get_alert_groups(silenced: Optional[bool] = None,
         - pagination: Metadata about pagination (total, offset, count, has_more)
           Use the 'has_more' flag to determine if additional pages are available.
     """
-    # Validate count parameter (alert groups are larger objects)
-    MAX_COUNT = 5
-    if count > MAX_COUNT:
-        return {
-            "error": f"Count parameter ({count}) exceeds maximum allowed value ({MAX_COUNT}). "
-                    f"Alert groups can be very large as they contain all alerts within each group. "
-                    f"Please use count <= {MAX_COUNT} and paginate through results using the offset parameter. "
-                    f"Example: Make multiple calls with offset=0, offset={MAX_COUNT}, offset={MAX_COUNT*2}, etc."
-        }
+    # Validate pagination parameters
+    count, offset, error = validate_pagination_params(count, offset, MAX_ALERT_GROUP_PAGE)
+    if error:
+        return {"error": error}
 
     params = {"active": True}
     if silenced is not None:
@@ -362,22 +402,8 @@ async def get_alert_groups(silenced: Optional[bool] = None,
     all_groups = make_request(method="GET", route="/api/v2/alerts/groups",
                               params=params)
 
-    # Apply pagination
-    total = len(all_groups)
-    end_index = offset + count
-    paginated_groups = all_groups[offset:end_index]
-    has_more = end_index < total
-
-    return {
-        "data": paginated_groups,
-        "pagination": {
-            "total": total,
-            "offset": offset,
-            "count": len(paginated_groups),
-            "requested_count": count,
-            "has_more": has_more
-        }
-    }
+    # Apply pagination and return results
+    return paginate_results(all_groups, count, offset)
 
 
 def setup_environment():
